@@ -45,8 +45,16 @@ import pc_bridge
 from gmail_client import get_gmail_service, get_unread_count, get_unread_emails
 from summarizer import summarize_email
 
+KALI_BUNKER_DIR = getattr(config, "KALI_BUNKER_DIR", None)
+
 try:
-    sys.path.insert(0, "/home/voide/Kali-Bunker-main")
+    if not KALI_BUNKER_DIR:
+        raise ImportError("KALI_BUNKER_DIR não configurado")
+    kali_bunker_path = str(Path(KALI_BUNKER_DIR).expanduser().resolve())
+    if not Path(kali_bunker_path).is_dir():
+        raise ImportError(f"Kali Bunker não encontrado em {kali_bunker_path}")
+    if kali_bunker_path not in sys.path:
+        sys.path.insert(0, kali_bunker_path)
     from remote_control import (
         ai_assistant,
         cancel_pending,
@@ -55,7 +63,7 @@ try:
         execute_typed_action,
         pop_pending,
     )
-except Exception:  # pragma: no cover - recurso opcional no ambiente local
+except Exception:  # pragma: no cover - recurso opcional no ambiente local/servidor
     ai_assistant = None
     cancel_pending = create_pending = execute_shell = execute_typed_action = pop_pending = None
 
@@ -138,11 +146,46 @@ def get_chat_id() -> int:
         raise RuntimeError("TELEGRAM_CHAT_ID deve ser um número inteiro.") from exc
 
 
+def get_allowed_user_ids() -> set[int]:
+    raw = str(getattr(config, "TELEGRAM_ALLOWED_USER_IDS", "") or "").strip()
+    if not raw:
+        # Em chat privado, chat_id == user_id. Em grupos, esse fallback bloqueia
+        # membros até TELEGRAM_ALLOWED_USER_IDS ser configurado explicitamente.
+        return {get_chat_id()}
+
+    allowed_ids: set[int] = set()
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        try:
+            allowed_ids.add(int(value))
+        except ValueError as exc:
+            raise RuntimeError(
+                "TELEGRAM_ALLOWED_USER_IDS deve conter apenas IDs numéricos separados por vírgula."
+            ) from exc
+
+    if not allowed_ids:
+        raise RuntimeError("TELEGRAM_ALLOWED_USER_IDS não contém nenhum ID válido.")
+    return allowed_ids
+
+
 def allowed(update: Update) -> bool:
     chat = update.effective_chat
-    permitted = bool(chat and chat.id == get_chat_id())
-    if not permitted and chat:
-        logger.warning("Acesso recusado para o chat %s", chat.id)
+    user = update.effective_user
+    expected_chat_id = get_chat_id()
+    permitted = bool(
+        chat
+        and chat.id == expected_chat_id
+        and user
+        and user.id in get_allowed_user_ids()
+    )
+    if not permitted:
+        logger.warning(
+            "Acesso Telegram recusado: chat=%s user=%s",
+            getattr(chat, "id", None),
+            getattr(user, "id", None),
+        )
     return permitted
 
 
@@ -157,6 +200,7 @@ def validate_config() -> None:
     if missing:
         raise RuntimeError(f"Configuração incompleta: {', '.join(missing)}")
     get_chat_id()
+    get_allowed_user_ids()
     if config.CHECK_INTERVAL_SECONDS < 10:
         raise RuntimeError("CHECK_INTERVAL_SECONDS deve ser >= 10.")
     if config.MAX_EMAILS_PER_CHECK < 1:

@@ -305,6 +305,7 @@ def claim_job(
     *,
     lease_seconds: int = JOB_LEASE_SECONDS,
     now: float | None = None,
+    update_agent: bool = True,
 ) -> dict[str, Any] | None:
     init_db()
     normalized_id = _agent_id(agent_id)
@@ -314,7 +315,8 @@ def claim_job(
     connection = _connect()
     try:
         connection.execute("BEGIN IMMEDIATE")
-        _upsert_agent(connection, normalized_id, normalized_metadata, now=timestamp)
+        if update_agent:
+            _upsert_agent(connection, normalized_id, normalized_metadata, now=timestamp)
         _recover_expired_jobs(connection, timestamp)
         row = connection.execute(
             """
@@ -351,6 +353,33 @@ def claim_job(
         raise
     finally:
         connection.close()
+
+
+def wait_for_job(
+    agent_id: str,
+    metadata: dict[str, Any] | None = None,
+    *,
+    lease_seconds: int = JOB_LEASE_SECONDS,
+    wait_seconds: int = 0,
+    interval_seconds: float = 1.0,
+) -> dict[str, Any] | None:
+    """Long-poll local no servidor para reduzir forks SSH/Python do agente ocioso."""
+    wait = max(0, min(int(wait_seconds), 60))
+    interval = max(0.2, min(float(interval_seconds), 5.0))
+    deadline = time.monotonic() + wait
+    first_attempt = True
+
+    while True:
+        job = claim_job(
+            agent_id,
+            metadata if first_attempt else None,
+            lease_seconds=lease_seconds,
+            update_agent=first_attempt,
+        )
+        first_attempt = False
+        if job is not None or time.monotonic() >= deadline:
+            return job
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
 def renew_job(
@@ -652,6 +681,8 @@ def cli(argv: list[str] | None = None) -> int:
     claim_parser = subparsers.add_parser("claim")
     claim_parser.add_argument("--agent", required=True)
     claim_parser.add_argument("--lease", type=int, default=JOB_LEASE_SECONDS)
+    claim_parser.add_argument("--wait", type=int, default=0)
+    claim_parser.add_argument("--interval", type=float, default=1.0)
 
     renew_parser = subparsers.add_parser("renew")
     renew_parser.add_argument("--agent", required=True)
@@ -684,7 +715,13 @@ def cli(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "claim":
         body = _stdin_json()
-        job = claim_job(args.agent, body.get("metadata", body), lease_seconds=args.lease)
+        job = wait_for_job(
+            args.agent,
+            body.get("metadata", body),
+            lease_seconds=args.lease,
+            wait_seconds=args.wait,
+            interval_seconds=args.interval,
+        )
         _print_json({"ok": True, "job": job})
         return 0
     if args.command == "renew":

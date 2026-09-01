@@ -1,0 +1,10 @@
+[Unit]
+Description=Kali Bunker - Agenda da limpeza semanal
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+Unit=limpeza-semanal.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+KB="$PROJECT_DIR/kb"
+
+while true; do
+  printf '\nKali Bunker\n'
+  printf '1) Resumo rapido\n'
+  printf '2) Diagnostico completo\n'
+  printf '3) Ligar modulos principais\n'
+  printf '4) Desligar modulos principais\n'
+  printf '5) Reiniciar modulos principais\n'
+  printf '6) Scan de rede desconhecidos\n'
+  printf '7) Lista de bloqueios\n'
+  printf '8) Backup rapido\n'
+  printf '9) Ajuda curta\n'
+  printf '0) Sair\n'
+  printf '> '
+  read -r option
+
+  case "$option" in
+    1) "$KB" overview || true ;;
+    2) "$KB" doctor || true ;;
+    3) sudo "$KB" up || true ;;
+    4) sudo "$KB" down || true ;;
+    5) sudo "$KB" restart || true ;;
+    6) "$KB" network scan --unknown-only || true ;;
+    7) "$KB" ban list || true ;;
+    8) "$KB" backup --keep 10 || true ;;
+    9) "$KB" quick ;;
+    0) exit 0 ;;
+    *) printf 'Opcao invalida.\n' ;;
+  esac
+done

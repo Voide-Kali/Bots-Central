@@ -1,0 +1,19 @@
+[Unit]
+Description=Monitor Gmail com notificacoes no Telegram
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projetos/gmail-telegram-bot
+UnsetEnvironment=APPIMAGE APPDIR LD_LIBRARY_PATH CHROME_DESKTOP GSETTINGS_SCHEMA_DIR
+ExecStart=%h/Projetos/gmail-telegram-bot/venv/bin/python %h/Projetos/gmail-telegram-bot/main.py
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=20
+UMask=0077
+
+[Install]
+WantedBy=default.target

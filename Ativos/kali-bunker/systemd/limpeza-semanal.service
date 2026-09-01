@@ -1,0 +1,12 @@
+[Unit]
+Description=Kali Bunker - Limpeza semanal
+After=local-fs.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/voide/Kali-Bunker-main
+ExecStart=/bin/bash /home/voide/Kali-Bunker-main/limpeza-semanal.sh
+TimeoutStartSec=20min
+UMask=0077
+Nice=19
+IOSchedulingClass=idle

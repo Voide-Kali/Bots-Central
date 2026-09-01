@@ -1,0 +1,19 @@
+[Unit]
+Description=Estudos Bot (Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voide
+Group=voide
+WorkingDirectory=/home/voide/estudos-bot-main
+EnvironmentFile=-/home/voide/estudos-bot-main/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/voide/estudos-bot-main/.venv/bin/python /home/voide/estudos-bot-main/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

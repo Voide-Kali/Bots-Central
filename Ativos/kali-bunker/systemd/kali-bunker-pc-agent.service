@@ -1,0 +1,20 @@
+[Unit]
+Description=Agente do PC para o painel remoto Kali Bunker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+Environment=PC_AGENT_ID=kali-principal
+Environment=PC_BRIDGE_SSH_HOST=voide@100.87.201.41
+Environment=PC_BRIDGE_REMOTE_SCRIPT=/home/voide/Projetos/gmail-telegram-bot/pc_bridge.py
+EnvironmentFile=-%h/.config/kali-bunker/pc-agent.env
+ExecStart=/usr/bin/python3 %h/Kali-Bunker-main/pc_agent.py
+Restart=always
+RestartSec=8
+TimeoutStopSec=20
+UMask=0077
+
+[Install]
+WantedBy=default.target

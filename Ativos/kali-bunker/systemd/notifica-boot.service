@@ -1,0 +1,14 @@
+[Unit]
+Description=Notificacao de boot (Kali Bunker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/home/voide/.env
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/voide
+ExecStart=/usr/bin/python3 /home/voide/notifica_boot.py
+
+[Install]
+WantedBy=default.target

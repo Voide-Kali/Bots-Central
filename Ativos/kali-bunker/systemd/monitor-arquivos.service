@@ -1,0 +1,18 @@
+[Unit]
+Description=Kali Bunker - Monitor de Arquivos
+After=local-fs.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/voide/Kali-Bunker-main
+ExecStart=/bin/bash /home/voide/Kali-Bunker-main/monitor-arquivos.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+UMask=0077
+Nice=10
+
+[Install]
+WantedBy=default.target

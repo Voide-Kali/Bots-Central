@@ -1,0 +1,25 @@
+[Unit]
+Description=Kali Bunker - Autovigilância e watchdog
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/home/voide/Kali-Bunker-main
+EnvironmentFile=-/home/voide/Kali-Bunker-main/.env
+EnvironmentFile=-/home/voide/.config/kali-bunker/.env
+ExecStart=/usr/bin/python3 -u /home/voide/Kali-Bunker-main/health_monitor.py
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/voide/.local/state/kali-bunker
+
+[Install]
+WantedBy=default.target

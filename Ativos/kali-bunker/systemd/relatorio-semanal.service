@@ -1,0 +1,11 @@
+[Unit]
+Description=Kali Bunker - Relatorio semanal
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/voide/Kali-Bunker-main
+ExecStart=/bin/bash /home/voide/Kali-Bunker-main/relatorio-semanal.sh
+TimeoutStartSec=2min
+UMask=0077

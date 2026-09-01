@@ -1,0 +1,19 @@
+[Unit]
+Description=Kali Bunker - Monitor WiFi
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/voide/Kali-Bunker-main
+ExecStart=/usr/bin/python3 -u /home/voide/Kali-Bunker-main/monitor-wifi.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+UMask=0077
+Nice=10
+
+[Install]
+WantedBy=default.target

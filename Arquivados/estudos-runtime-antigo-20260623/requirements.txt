@@ -1,0 +1,4 @@
+python-telegram-bot==21.6
+pypdf==4.2.0
+requests==2.32.2
+google-genai>=1.0.0

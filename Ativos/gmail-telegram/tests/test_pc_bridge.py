@@ -1,0 +1,99 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+import pc_bridge
+
+
+class PcBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.old_db = pc_bridge.DB_FILE
+        self.old_artifacts = pc_bridge.ARTIFACT_DIR
+        pc_bridge.DB_FILE = root / "bridge.db"
+        pc_bridge.ARTIFACT_DIR = root / "artifacts"
+        pc_bridge.init_db()
+
+    def tearDown(self):
+        pc_bridge.DB_FILE = self.old_db
+        pc_bridge.ARTIFACT_DIR = self.old_artifacts
+        self.temporary.cleanup()
+
+    def test_job_runs_through_queue_and_notification(self):
+        created = pc_bridge.enqueue_job(
+            "network_scan",
+            {"target": "192.168.1.0/24"},
+            description="Mapear a rede",
+            requested_by="telegram:test",
+            now=100,
+        )
+        self.assertEqual(created["status"], "queued")
+
+        claimed = pc_bridge.claim_job(
+            pc_bridge.DEFAULT_AGENT_ID,
+            {"hostname": "kali", "version": "1"},
+            now=101,
+        )
+        self.assertEqual(claimed["job_id"], created["job_id"])
+        self.assertEqual(claimed["payload"]["target"], "192.168.1.0/24")
+
+        self.assertTrue(
+            pc_bridge.complete_job(
+                created["job_id"],
+                pc_bridge.DEFAULT_AGENT_ID,
+                ok=True,
+                result_text="2 hosts ativos",
+                now=102,
+            )
+        )
+        notices = pc_bridge.pending_notifications()
+        self.assertEqual([item["job_id"] for item in notices], [created["job_id"]])
+        self.assertTrue(pc_bridge.mark_notified(created["job_id"]))
+        self.assertEqual(pc_bridge.pending_notifications(), [])
+
+    def test_offline_job_remains_queued_until_agent_returns(self):
+        created = pc_bridge.enqueue_job("status", {}, now=200)
+        self.assertEqual(pc_bridge.get_job(created["job_id"])["status"], "queued")
+        claimed = pc_bridge.claim_job(pc_bridge.DEFAULT_AGENT_ID, {"hostname": "pc"}, now=900)
+        self.assertEqual(claimed["job_id"], created["job_id"])
+
+    def test_cancel_queued_and_request_cancel_running(self):
+        queued = pc_bridge.enqueue_job("status", {})
+        canceled = pc_bridge.cancel_job(queued["job_id"])
+        self.assertEqual(canceled["status"], "canceled")
+
+        running = pc_bridge.enqueue_job("shell", {"command": "uname -a"})
+        pc_bridge.claim_job(pc_bridge.DEFAULT_AGENT_ID, {"hostname": "pc"})
+        requested = pc_bridge.cancel_job(running["job_id"])
+        self.assertEqual(requested["status"], "running")
+        self.assertTrue(requested["cancel_requested"])
+        renewal = pc_bridge.renew_job(running["job_id"], pc_bridge.DEFAULT_AGENT_ID)
+        self.assertTrue(renewal["cancel_requested"])
+
+    def test_artifact_must_belong_to_running_job(self):
+        created = pc_bridge.enqueue_job("webcam", {})
+        pc_bridge.claim_job(pc_bridge.DEFAULT_AGENT_ID, {"hostname": "pc"})
+        target = pc_bridge.artifact_target(
+            created["job_id"], pc_bridge.DEFAULT_AGENT_ID, ".jpg"
+        )
+        Path(target["path"]).write_bytes(b"jpeg")
+        self.assertTrue(
+            pc_bridge.complete_job(
+                created["job_id"],
+                pc_bridge.DEFAULT_AGENT_ID,
+                ok=True,
+                result_text="foto",
+                artifact_name=target["name"],
+            )
+        )
+        self.assertEqual(pc_bridge.get_job(created["job_id"])["artifact_name"], target["name"])
+
+    def test_agent_online_state_uses_last_heartbeat(self):
+        pc_bridge.heartbeat_agent("kali-principal", {"hostname": "pc"}, now=1000)
+        self.assertTrue(pc_bridge.get_agent("kali-principal", now=1010)["online"])
+        self.assertFalse(pc_bridge.get_agent("kali-principal", now=1100)["online"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,5 @@
+config.py
+temp_pdfs/
+__pycache__/
+*.pyc
+venv/

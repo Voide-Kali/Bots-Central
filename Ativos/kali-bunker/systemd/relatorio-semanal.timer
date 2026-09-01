@@ -1,0 +1,10 @@
+[Unit]
+Description=Kali Bunker - Agenda do relatorio semanal
+
+[Timer]
+OnCalendar=Sun *-*-* 09:00:00
+Persistent=true
+Unit=relatorio-semanal.service
+
+[Install]
+WantedBy=timers.target

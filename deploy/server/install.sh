@@ -46,7 +46,7 @@ done
 ln -sfn "$ETC_ROOT/gmail-config.py" "$RELEASE_DIR/Ativos/gmail-telegram/config.py"
 ln -sfn "$ETC_ROOT/credentials" "$RELEASE_DIR/Ativos/gmail-telegram/credentials"
 ln -sfn "$STATE_ROOT/gmail_bot.db" "$RELEASE_DIR/Ativos/gmail-telegram/gmail_bot.db"
-ln -sfn "$ETC_ROOT/studies-config.py" "$RELEASE_DIR/Ativos/estudos/config.py"
+rm -f "$RELEASE_DIR/Ativos/estudos/config.py"\ninstall -o root -g root -m 0644 "$ETC_ROOT/studies-config.py" "$RELEASE_DIR/Ativos/estudos/config.py"
 
 if [[ ! -f "$ETC_ROOT/bots-central.env" ]]; then
   cp "$SCRIPT_DIR/bots-central.env.example" "$ETC_ROOT/bots-central.env"

@@ -26,9 +26,9 @@ REMOTE_SCRIPT = os.environ.get(
     "PC_BRIDGE_REMOTE_SCRIPT",
     "/home/voide/Projetos/gmail-telegram-bot/pc_bridge.py",
 ).strip()
-POLL_SECONDS = max(1, int(os.environ.get("PC_AGENT_POLL_SECONDS", "2")))
+POLL_SECONDS = max(1, int(os.environ.get("PC_AGENT_POLL_SECONDS", "1")))
 METADATA_REFRESH_SECONDS = max(5, int(os.environ.get("PC_AGENT_METADATA_REFRESH_SECONDS", "30")))
-LONG_POLL_SECONDS = max(0, min(int(os.environ.get("PC_AGENT_LONG_POLL_SECONDS", "20")), 60))
+LONG_POLL_SECONDS = max(0, min(int(os.environ.get("PC_AGENT_LONG_POLL_SECONDS", "30")), 60))
 JOB_LEASE_SECONDS = max(120, int(os.environ.get("PC_JOB_LEASE_SECONDS", "900")))
 COMMAND_TIMEOUT = max(10, int(os.environ.get("PC_AGENT_COMMAND_TIMEOUT", "300")))
 MAX_OUTPUT_CHARS = max(1000, int(os.environ.get("PC_AGENT_MAX_OUTPUT_CHARS", "12000")))

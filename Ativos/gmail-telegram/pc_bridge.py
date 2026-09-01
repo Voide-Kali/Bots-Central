@@ -164,6 +164,15 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_pc_jobs_running_lease
             ON pc_jobs(status, lease_until);
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_queue_ready
+            ON pc_jobs(target_agent, created_at, job_id)
+            WHERE status = 'queued';
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_pending_notice
+            ON pc_jobs(completed_at, created_at)
+            WHERE notified = 0
+              AND status IN ('completed', 'failed', 'canceled');
                 """
             )
             connection.commit()

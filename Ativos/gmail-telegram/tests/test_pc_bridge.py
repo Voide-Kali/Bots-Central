@@ -35,21 +35,23 @@ class PcBridgeTests(unittest.TestCase):
         self.assertEqual(claimed["job_id"], created["job_id"])
         self.assertEqual(upsert.call_count, 1)
 
-    def test_long_poll_timeout_does_not_busy_loop(self):
-        clock = [0.0, 0.0, 0.5, 1.0]
+    def test_long_poll_uses_read_probe_while_queue_is_idle(self):
+        monotonic_values = iter([0.0, 0.0, 0.2, 1.0, 1.0])
         with (
-            patch.object(pc_bridge.time, "monotonic", side_effect=clock),
+            patch.object(pc_bridge.time, "monotonic", side_effect=lambda: next(monotonic_values)),
             patch.object(pc_bridge.time, "sleep") as sleeper,
             patch.object(pc_bridge, "claim_job", return_value=None) as claim,
+            patch.object(pc_bridge, "_queued_job_exists", return_value=False) as probe,
         ):
             result = pc_bridge.wait_for_job(
                 pc_bridge.DEFAULT_AGENT_ID,
                 {"hostname": "pc"},
                 wait_seconds=1,
-                interval_seconds=0.5,
+                interval_seconds=0.2,
             )
         self.assertIsNone(result)
-        self.assertGreaterEqual(claim.call_count, 2)
+        self.assertEqual(claim.call_count, 1)
+        self.assertGreaterEqual(probe.call_count, 1)
         self.assertGreaterEqual(sleeper.call_count, 1)
 
     def test_repeated_init_reuses_initialized_schema(self):

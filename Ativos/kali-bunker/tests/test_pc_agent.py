@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import pc_agent
 
@@ -20,6 +21,33 @@ class PcAgentTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             pc_agent._shell_argv("uname -a; id")
+
+    def test_metadata_cache_reuses_expensive_snapshot_until_refresh(self):
+        first = {"hostname": "pc", "telemetry": {"cpu_percent": 10}}
+        second = {"hostname": "pc", "telemetry": {"cpu_percent": 20}}
+        cache = pc_agent.MetadataCache(refresh_seconds=30)
+
+        with (
+            patch.object(pc_agent, "collect_metadata", side_effect=[first, second]) as collect,
+            patch.object(pc_agent.time, "monotonic", side_effect=[0.0, 5.0, 31.0]),
+        ):
+            self.assertIs(cache.get(), first)
+            self.assertIs(cache.get(), first)
+            self.assertIs(cache.get(), second)
+
+        self.assertEqual(collect.call_count, 2)
+
+    def test_metadata_cache_can_be_invalidated_after_action(self):
+        first = {"hostname": "pc", "services": {"a": "active"}}
+        second = {"hostname": "pc", "services": {"a": "inactive"}}
+        cache = pc_agent.MetadataCache(refresh_seconds=300)
+
+        with patch.object(pc_agent, "collect_metadata", side_effect=[first, second]) as collect:
+            self.assertIs(cache.get(), first)
+            cache.invalidate()
+            self.assertIs(cache.get(), second)
+
+        self.assertEqual(collect.call_count, 2)
 
     def test_scan_formatter_organizes_hosts(self):
         raw = """Nmap scan report for router (192.168.1.1)

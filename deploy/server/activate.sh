@@ -7,7 +7,7 @@ CURRENT=/opt/bots-central/current
 
 [[ -L "$CURRENT" ]] || { echo "Instalação não preparada: $CURRENT ausente." >&2; exit 1; }
 
-REPO_ROOT="$CURRENT" "$ROOT/preflight.sh"
+REPO_ROOT="$CURRENT" bash "$ROOT/preflight.sh"
 
 grep -q 'usuario@gmail.com' /etc/bots-central/gmail-config.py 2>/dev/null && {
   echo "gmail-config.py ainda contém a conta de exemplo usuario@gmail.com." >&2

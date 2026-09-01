@@ -71,6 +71,8 @@ class PcBridgeTests(unittest.TestCase):
             connection.close()
         self.assertIn("idx_pc_jobs_agent_recent", names)
         self.assertIn("idx_pc_jobs_running_lease", names)
+        self.assertIn("idx_pc_jobs_queue_ready", names)
+        self.assertIn("idx_pc_jobs_pending_notice", names)
 
     def test_job_runs_through_queue_and_notification(self):
         created = pc_bridge.enqueue_job(

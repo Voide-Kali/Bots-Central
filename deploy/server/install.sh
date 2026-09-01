@@ -4,6 +4,7 @@ set -euo pipefail
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo "Execute como root/sudo." >&2; exit 1; }
 
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPECTED_SHA="${EXPECTED_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 APP_ROOT=/opt/bots-central
 RELEASE_DIR="$APP_ROOT/releases/$EXPECTED_SHA"
@@ -48,13 +49,13 @@ ln -sfn "$STATE_ROOT/gmail_bot.db" "$RELEASE_DIR/Ativos/gmail-telegram/gmail_bot
 ln -sfn "$ETC_ROOT/studies-config.py" "$RELEASE_DIR/Ativos/estudos/config.py"
 
 if [[ ! -f "$ETC_ROOT/bots-central.env" ]]; then
-  cp "$RELEASE_DIR/deploy/server/bots-central.env.example" "$ETC_ROOT/bots-central.env"
+  cp "$SCRIPT_DIR/bots-central.env.example" "$ETC_ROOT/bots-central.env"
   chown "$SERVICE_USER:$SERVICE_USER" "$ETC_ROOT/bots-central.env"
   chmod 0600 "$ETC_ROOT/bots-central.env"
   echo "Criado $ETC_ROOT/bots-central.env. Preencha antes de ativar." >&2
 fi
 if [[ ! -f "$ETC_ROOT/studies.env" ]]; then
-  cp "$RELEASE_DIR/deploy/server/studies.env.example" "$ETC_ROOT/studies.env"
+  cp "$SCRIPT_DIR/studies.env.example" "$ETC_ROOT/studies.env"
   chown "$SERVICE_USER:$SERVICE_USER" "$ETC_ROOT/studies.env"
   chmod 0600 "$ETC_ROOT/studies.env"
   echo "Criado $ETC_ROOT/studies.env. Preencha antes de ativar." >&2
@@ -72,8 +73,8 @@ ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 chown -R root:root "$RELEASE_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$STATE_ROOT" "$ETC_ROOT"
 
-install -m 0644 "$RELEASE_DIR/deploy/server/bots-central.service" /etc/systemd/system/bots-central.service
-install -m 0644 "$RELEASE_DIR/deploy/server/bots-central-studies.service" /etc/systemd/system/bots-central-studies.service
+install -m 0644 "$SCRIPT_DIR/bots-central.service" /etc/systemd/system/bots-central.service
+install -m 0644 "$SCRIPT_DIR/bots-central-studies.service" /etc/systemd/system/bots-central-studies.service
 systemctl daemon-reload
 
 echo "Instalação preparada em $RELEASE_DIR"

@@ -14,6 +14,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -51,13 +52,14 @@ VALID_ACTIONS = {
     "install_package",
 }
 FINAL_STATUSES = {"completed", "failed", "canceled"}
+_SCHEMA_LOCK = threading.Lock()
+_INITIALIZED_DB: Path | None = None
 
 
 def _connect() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_FILE, timeout=15)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 15000")
-    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 
@@ -104,12 +106,23 @@ def _row_to_job(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def init_db() -> None:
-    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    connection = _connect()
-    try:
-        connection.executescript(
-            """
+    global _INITIALIZED_DB
+    current_db = DB_FILE
+    if _INITIALIZED_DB == current_db and current_db.exists():
+        return
+
+    with _SCHEMA_LOCK:
+        if _INITIALIZED_DB == current_db and current_db.exists():
+            return
+        DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        connection = _connect()
+        try:
+            # journal_mode é persistente no arquivo; configure uma vez durante
+            # inicialização em vez de renegociá-lo em toda conexão do hot path.
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(
+                """
             CREATE TABLE IF NOT EXISTS pc_agents (
                 agent_id TEXT PRIMARY KEY,
                 hostname TEXT NOT NULL DEFAULT '',
@@ -145,16 +158,32 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_pc_jobs_notifications
             ON pc_jobs(notified, status, completed_at);
-            """
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    for path in (DB_FILE, ARTIFACT_DIR):
-        try:
-            path.chmod(0o600 if path.is_file() else 0o700)
-        except OSError:
-            pass
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_agent_recent
+            ON pc_jobs(target_agent, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_running_lease
+            ON pc_jobs(status, lease_until);
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_queue_ready
+            ON pc_jobs(target_agent, created_at, job_id)
+            WHERE status = 'queued';
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_pending_notice
+            ON pc_jobs(completed_at, created_at)
+            WHERE notified = 0
+              AND status IN ('completed', 'failed', 'canceled');
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        for path in (DB_FILE, ARTIFACT_DIR):
+            try:
+                path.chmod(0o600 if path.is_file() else 0o700)
+            except OSError:
+                pass
+        _INITIALIZED_DB = current_db
 
 
 def _upsert_agent(
@@ -252,7 +281,11 @@ def enqueue_job(
                     ),
                 )
                 connection.commit()
-                return get_job(job_id) or {"job_id": job_id, "status": "queued"}
+                row = connection.execute(
+                    "SELECT * FROM pc_jobs WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                return _row_to_job(row) or {"job_id": job_id, "status": "queued"}
             except sqlite3.IntegrityError:
                 continue
     finally:
@@ -283,6 +316,7 @@ def claim_job(
     *,
     lease_seconds: int = JOB_LEASE_SECONDS,
     now: float | None = None,
+    update_agent: bool = True,
 ) -> dict[str, Any] | None:
     init_db()
     normalized_id = _agent_id(agent_id)
@@ -292,7 +326,8 @@ def claim_job(
     connection = _connect()
     try:
         connection.execute("BEGIN IMMEDIATE")
-        _upsert_agent(connection, normalized_id, normalized_metadata, now=timestamp)
+        if update_agent:
+            _upsert_agent(connection, normalized_id, normalized_metadata, now=timestamp)
         _recover_expired_jobs(connection, timestamp)
         row = connection.execute(
             """
@@ -329,6 +364,69 @@ def claim_job(
         raise
     finally:
         connection.close()
+
+
+def _queued_job_exists(agent_id: str) -> bool:
+    normalized_agent = _agent_id(agent_id)
+    connection = _connect()
+    try:
+        row = connection.execute(
+            """
+            SELECT 1 FROM pc_jobs
+            WHERE target_agent = ? AND status = 'queued'
+            LIMIT 1
+            """,
+            (normalized_agent,),
+        ).fetchone()
+        return row is not None
+    finally:
+        connection.close()
+
+
+def wait_for_job(
+    agent_id: str,
+    metadata: dict[str, Any] | None = None,
+    *,
+    lease_seconds: int = JOB_LEASE_SECONDS,
+    wait_seconds: int = 0,
+    interval_seconds: float = 1.0,
+) -> dict[str, Any] | None:
+    """Long-poll local no servidor com leitura barata enquanto a fila está vazia."""
+    wait = max(0, min(int(wait_seconds), 60))
+    interval = max(0.2, min(float(interval_seconds), 5.0))
+    deadline = time.monotonic() + wait
+
+    # Primeiro claim atualiza heartbeat/metadata e também recupera leases vencidos.
+    job = claim_job(
+        agent_id,
+        metadata,
+        lease_seconds=lease_seconds,
+        update_agent=True,
+    )
+    if job is not None or wait <= 0:
+        return job
+
+    # Enquanto o agente espera, evite BEGIN IMMEDIATE em cada tick. A maioria
+    # absoluta dos ticks ociosos vira um SELECT indexado. A cada ~5 s fazemos
+    # um claim completo para preservar recuperação de leases expirados.
+    next_recovery = time.monotonic() + min(5.0, max(interval, 1.0))
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+
+        if _queued_job_exists(agent_id) or now >= next_recovery:
+            job = claim_job(
+                agent_id,
+                None,
+                lease_seconds=lease_seconds,
+                update_agent=False,
+            )
+            if job is not None:
+                return job
+            next_recovery = time.monotonic() + min(5.0, max(interval, 1.0))
+
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
 def renew_job(
@@ -482,7 +580,11 @@ def cancel_job(job_id: str, *, now: float | None = None) -> dict[str, Any] | Non
                 (timestamp, normalized_job),
             )
         connection.commit()
-        return get_job(normalized_job)
+        current = connection.execute(
+            "SELECT * FROM pc_jobs WHERE job_id = ?",
+            (normalized_job,),
+        ).fetchone()
+        return _row_to_job(current)
     except Exception:
         connection.rollback()
         raise
@@ -626,6 +728,8 @@ def cli(argv: list[str] | None = None) -> int:
     claim_parser = subparsers.add_parser("claim")
     claim_parser.add_argument("--agent", required=True)
     claim_parser.add_argument("--lease", type=int, default=JOB_LEASE_SECONDS)
+    claim_parser.add_argument("--wait", type=int, default=0)
+    claim_parser.add_argument("--interval", type=float, default=1.0)
 
     renew_parser = subparsers.add_parser("renew")
     renew_parser.add_argument("--agent", required=True)
@@ -658,7 +762,13 @@ def cli(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "claim":
         body = _stdin_json()
-        job = claim_job(args.agent, body.get("metadata", body), lease_seconds=args.lease)
+        job = wait_for_job(
+            args.agent,
+            body.get("metadata", body),
+            lease_seconds=args.lease,
+            wait_seconds=args.wait,
+            interval_seconds=args.interval,
+        )
         _print_json({"ok": True, "job": job})
         return 0
     if args.command == "renew":

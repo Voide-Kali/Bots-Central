@@ -28,6 +28,7 @@ REMOTE_SCRIPT = os.environ.get(
 ).strip()
 POLL_SECONDS = max(1, int(os.environ.get("PC_AGENT_POLL_SECONDS", "2")))
 METADATA_REFRESH_SECONDS = max(5, int(os.environ.get("PC_AGENT_METADATA_REFRESH_SECONDS", "30")))
+LONG_POLL_SECONDS = max(0, min(int(os.environ.get("PC_AGENT_LONG_POLL_SECONDS", "20")), 60))
 JOB_LEASE_SECONDS = max(120, int(os.environ.get("PC_JOB_LEASE_SECONDS", "900")))
 COMMAND_TIMEOUT = max(10, int(os.environ.get("PC_AGENT_COMMAND_TIMEOUT", "300")))
 MAX_OUTPUT_CHARS = max(1000, int(os.environ.get("PC_AGENT_MAX_OUTPUT_CHARS", "12000")))
@@ -126,13 +127,26 @@ class BridgeClient:
         return response
 
     def claim(self, metadata: dict[str, Any]) -> dict[str, Any] | None:
-        response = self.call(
-            "claim",
+        arguments = [
             "--agent",
             AGENT_ID,
             "--lease",
             str(JOB_LEASE_SECONDS),
+        ]
+        if LONG_POLL_SECONDS > 0:
+            arguments.extend(
+                [
+                    "--wait",
+                    str(LONG_POLL_SECONDS),
+                    "--interval",
+                    str(POLL_SECONDS),
+                ]
+            )
+        response = self.call(
+            "claim",
+            *arguments,
             payload={"metadata": metadata},
+            timeout=max(30, LONG_POLL_SECONDS + 10),
         )
         job = response.get("job")
         return job if isinstance(job, dict) else None
@@ -859,10 +873,11 @@ def run_forever() -> None:
     bridge = BridgeClient()
     metadata_cache = MetadataCache()
     logger.info(
-        "Agente %s iniciado; servidor %s; polling=%ss; telemetria=%ss.",
+        "Agente %s iniciado; servidor %s; polling=%ss; long-poll=%ss; telemetria=%ss.",
         AGENT_ID,
         SERVER,
         POLL_SECONDS,
+        LONG_POLL_SECONDS,
         METADATA_REFRESH_SECONDS,
     )
     last_error_log = 0.0
@@ -870,7 +885,10 @@ def run_forever() -> None:
         try:
             job = bridge.claim(metadata_cache.get())
             if not job:
-                time.sleep(POLL_SECONDS)
+                # A chamada claim já aguardou no servidor quando long-poll está ativo.
+                # Só dorme no modo legado para não criar um busy loop.
+                if LONG_POLL_SECONDS <= 0:
+                    time.sleep(POLL_SECONDS)
                 continue
             logger.info("Executando tarefa %s (%s).", job.get("job_id"), job.get("action"))
             ok, result, artifact, canceled = execute_job(job, bridge)

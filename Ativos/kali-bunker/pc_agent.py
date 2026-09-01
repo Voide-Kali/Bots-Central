@@ -26,7 +26,8 @@ REMOTE_SCRIPT = os.environ.get(
     "PC_BRIDGE_REMOTE_SCRIPT",
     "/home/voide/Projetos/gmail-telegram-bot/pc_bridge.py",
 ).strip()
-POLL_SECONDS = max(2, int(os.environ.get("PC_AGENT_POLL_SECONDS", "5")))
+POLL_SECONDS = max(1, int(os.environ.get("PC_AGENT_POLL_SECONDS", "2")))
+METADATA_REFRESH_SECONDS = max(5, int(os.environ.get("PC_AGENT_METADATA_REFRESH_SECONDS", "30")))
 JOB_LEASE_SECONDS = max(120, int(os.environ.get("PC_JOB_LEASE_SECONDS", "900")))
 COMMAND_TIMEOUT = max(10, int(os.environ.get("PC_AGENT_COMMAND_TIMEOUT", "300")))
 MAX_OUTPUT_CHARS = max(1000, int(os.environ.get("PC_AGENT_MAX_OUTPUT_CHARS", "12000")))
@@ -310,6 +311,29 @@ def collect_metadata() -> dict[str, Any]:
         "services": _service_states(),
         "telemetry": _telemetry(),
     }
+
+
+class MetadataCache:
+    """Evita recomputar telemetria cara em cada consulta da fila."""
+
+    def __init__(self, refresh_seconds: int = METADATA_REFRESH_SECONDS) -> None:
+        self.refresh_seconds = max(1, int(refresh_seconds))
+        self._value: dict[str, Any] | None = None
+        self._updated_at = 0.0
+
+    def get(self, *, force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if (
+            force
+            or self._value is None
+            or now - self._updated_at >= self.refresh_seconds
+        ):
+            self._value = collect_metadata()
+            self._updated_at = now
+        return self._value
+
+    def invalidate(self) -> None:
+        self._value = None
 
 
 def _default_network_target() -> str:
@@ -833,18 +857,27 @@ def _finish_job(
 
 def run_forever() -> None:
     bridge = BridgeClient()
-    logger.info("Agente %s iniciado; servidor %s.", AGENT_ID, SERVER)
+    metadata_cache = MetadataCache()
+    logger.info(
+        "Agente %s iniciado; servidor %s; polling=%ss; telemetria=%ss.",
+        AGENT_ID,
+        SERVER,
+        POLL_SECONDS,
+        METADATA_REFRESH_SECONDS,
+    )
     last_error_log = 0.0
     while True:
         try:
-            metadata = collect_metadata()
-            job = bridge.claim(metadata)
+            job = bridge.claim(metadata_cache.get())
             if not job:
                 time.sleep(POLL_SECONDS)
                 continue
             logger.info("Executando tarefa %s (%s).", job.get("job_id"), job.get("action"))
             ok, result, artifact, canceled = execute_job(job, bridge)
             _finish_job(bridge, job, ok, result, artifact, canceled)
+            # A próxima publicação deve refletir imediatamente mudanças causadas
+            # pela ação recém-executada (serviços, energia, rede etc.).
+            metadata_cache.invalidate()
             logger.info(
                 "Tarefa %s finalizada: %s.",
                 job.get("job_id"),

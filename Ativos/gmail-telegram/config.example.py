@@ -10,6 +10,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PROJECT_DIR = Path(__file__).resolve().parent
+_legacy_kali_bunker_dir = Path.home() / "Kali-Bunker-main"
+KALI_BUNKER_DIR = Path(
+    os.environ.get("KALI_BUNKER_DIR", str(_legacy_kali_bunker_dir))
+).expanduser()
 PC_AGENT_ID = os.environ.get("PC_AGENT_ID", "kali-principal")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")

@@ -66,3 +66,23 @@ jobs:
         run: python -m py_compile *.py
       - name: Test
         run: python -m pytest -q
+
+
+  deploy-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Validate deploy scripts
+        run: |
+          bash -n deploy/server/preflight.sh
+          bash -n deploy/server/install.sh
+          bash -n deploy/server/activate.sh
+          bash -n deploy/server/verify.sh
+          bash -n deploy/server/rollback.sh
+      - name: Run read-only preflight
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: ./deploy/server/preflight.sh

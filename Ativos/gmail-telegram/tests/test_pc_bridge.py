@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pc_bridge
@@ -21,6 +22,35 @@ class PcBridgeTests(unittest.TestCase):
         pc_bridge.ARTIFACT_DIR = self.old_artifacts
         pc_bridge._INITIALIZED_DB = None
         self.temporary.cleanup()
+
+    def test_long_poll_returns_job_without_repeated_agent_metadata_updates(self):
+        created = pc_bridge.enqueue_job("status", {}, now=100)
+        with patch.object(pc_bridge, "_upsert_agent", wraps=pc_bridge._upsert_agent) as upsert:
+            claimed = pc_bridge.wait_for_job(
+                pc_bridge.DEFAULT_AGENT_ID,
+                {"hostname": "pc"},
+                wait_seconds=5,
+                interval_seconds=0.2,
+            )
+        self.assertEqual(claimed["job_id"], created["job_id"])
+        self.assertEqual(upsert.call_count, 1)
+
+    def test_long_poll_timeout_does_not_busy_loop(self):
+        clock = [0.0, 0.0, 0.5, 1.0]
+        with (
+            patch.object(pc_bridge.time, "monotonic", side_effect=clock),
+            patch.object(pc_bridge.time, "sleep") as sleeper,
+            patch.object(pc_bridge, "claim_job", return_value=None) as claim,
+        ):
+            result = pc_bridge.wait_for_job(
+                pc_bridge.DEFAULT_AGENT_ID,
+                {"hostname": "pc"},
+                wait_seconds=1,
+                interval_seconds=0.5,
+            )
+        self.assertIsNone(result)
+        self.assertGreaterEqual(claim.call_count, 2)
+        self.assertGreaterEqual(sleeper.call_count, 1)
 
     def test_repeated_init_reuses_initialized_schema(self):
         initialized = pc_bridge._INITIALIZED_DB

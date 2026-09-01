@@ -85,4 +85,4 @@ jobs:
       - name: Run read-only preflight
         env:
           EXPECTED_SHA: ${{ github.sha }}
-        run: ./deploy/server/preflight.sh
+        run: bash deploy/server/preflight.sh

@@ -8,14 +8,14 @@ não rastreados, secrets ou alterações locais.
 No clone validado:
 
 ```bash
-EXPECTED_SHA=<sha-verde> ./deploy/server/preflight.sh
-sudo EXPECTED_SHA=<sha-verde> ./deploy/server/install.sh
+EXPECTED_SHA=<sha-verde> bash deploy/server/preflight.sh
+sudo EXPECTED_SHA=<sha-verde> bash deploy/server/install.sh
 sudoedit /etc/bots-central/bots-central.env
 sudoedit /etc/bots-central/studies.env
 sudoedit /etc/bots-central/gmail-config.py
 sudoedit /etc/bots-central/studies-config.py
-sudo ./deploy/server/activate.sh
-sudo ./deploy/server/verify.sh
+sudo bash deploy/server/activate.sh
+sudo bash deploy/server/verify.sh
 ```
 
 O instalador usa `git archive` do SHA informado. Portanto um working tree sujo

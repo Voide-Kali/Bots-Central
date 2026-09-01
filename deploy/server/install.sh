@@ -34,6 +34,12 @@ if [[ ! -d "$RELEASE_DIR" ]]; then
   trap - EXIT
 fi
 
+# mktemp cria o diretório temporário com modo 0700. Após o mv, a release
+# preserva esse modo e o usuário de serviço não consegue atravessá-la.
+# Código versionado não contém secrets; permita leitura/travessia do serviço.
+find "$RELEASE_DIR" -type d -exec chmod 0755 {} +
+find "$RELEASE_DIR" -type f -exec chmod a+r {} +
+
 for spec in   "$ETC_ROOT/gmail-config.py:$RELEASE_DIR/Ativos/gmail-telegram/config.example.py"   "$ETC_ROOT/studies-config.py:$RELEASE_DIR/Ativos/estudos/config.example.py"; do
   target="${spec%%:*}"; source="${spec#*:}"
   if [[ ! -e "$target" ]]; then

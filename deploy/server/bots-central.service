@@ -1,0 +1,29 @@
+[Unit]
+Description=Bots Central - Gmail, IA e orquestracao Telegram
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=bots-central
+Group=bots-central
+WorkingDirectory=/opt/bots-central/Ativos/gmail-telegram
+EnvironmentFile=/etc/bots-central/bots-central.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bots-central/.venv/bin/python /opt/bots-central/Ativos/gmail-telegram/main.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bots-central/Ativos/gmail-telegram
+ReadWritePaths=/var/lib/bots-central
+
+[Install]
+WantedBy=multi-user.target

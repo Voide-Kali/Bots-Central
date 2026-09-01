@@ -14,6 +14,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,8 @@ VALID_ACTIONS = {
     "install_package",
 }
 FINAL_STATUSES = {"completed", "failed", "canceled"}
+_SCHEMA_LOCK = threading.Lock()
+_INITIALIZED_DB: Path | None = None
 
 
 def _connect() -> sqlite3.Connection:
@@ -104,12 +107,20 @@ def _row_to_job(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def init_db() -> None:
-    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    connection = _connect()
-    try:
-        connection.executescript(
-            """
+    global _INITIALIZED_DB
+    current_db = DB_FILE
+    if _INITIALIZED_DB == current_db and current_db.exists():
+        return
+
+    with _SCHEMA_LOCK:
+        if _INITIALIZED_DB == current_db and current_db.exists():
+            return
+        DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        connection = _connect()
+        try:
+            connection.executescript(
+                """
             CREATE TABLE IF NOT EXISTS pc_agents (
                 agent_id TEXT PRIMARY KEY,
                 hostname TEXT NOT NULL DEFAULT '',
@@ -145,16 +156,23 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_pc_jobs_notifications
             ON pc_jobs(notified, status, completed_at);
-            """
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    for path in (DB_FILE, ARTIFACT_DIR):
-        try:
-            path.chmod(0o600 if path.is_file() else 0o700)
-        except OSError:
-            pass
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_agent_recent
+            ON pc_jobs(target_agent, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_pc_jobs_running_lease
+            ON pc_jobs(status, lease_until);
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        for path in (DB_FILE, ARTIFACT_DIR):
+            try:
+                path.chmod(0o600 if path.is_file() else 0o700)
+            except OSError:
+                pass
+        _INITIALIZED_DB = current_db
 
 
 def _upsert_agent(
@@ -252,7 +270,11 @@ def enqueue_job(
                     ),
                 )
                 connection.commit()
-                return get_job(job_id) or {"job_id": job_id, "status": "queued"}
+                row = connection.execute(
+                    "SELECT * FROM pc_jobs WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                return _row_to_job(row) or {"job_id": job_id, "status": "queued"}
             except sqlite3.IntegrityError:
                 continue
     finally:
@@ -482,7 +504,11 @@ def cancel_job(job_id: str, *, now: float | None = None) -> dict[str, Any] | Non
                 (timestamp, normalized_job),
             )
         connection.commit()
-        return get_job(normalized_job)
+        current = connection.execute(
+            "SELECT * FROM pc_jobs WHERE job_id = ?",
+            (normalized_job,),
+        ).fetchone()
+        return _row_to_job(current)
     except Exception:
         connection.rollback()
         raise

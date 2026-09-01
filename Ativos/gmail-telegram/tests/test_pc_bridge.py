@@ -13,12 +13,32 @@ class PcBridgeTests(unittest.TestCase):
         self.old_artifacts = pc_bridge.ARTIFACT_DIR
         pc_bridge.DB_FILE = root / "bridge.db"
         pc_bridge.ARTIFACT_DIR = root / "artifacts"
+        pc_bridge._INITIALIZED_DB = None
         pc_bridge.init_db()
 
     def tearDown(self):
         pc_bridge.DB_FILE = self.old_db
         pc_bridge.ARTIFACT_DIR = self.old_artifacts
+        pc_bridge._INITIALIZED_DB = None
         self.temporary.cleanup()
+
+    def test_repeated_init_reuses_initialized_schema(self):
+        initialized = pc_bridge._INITIALIZED_DB
+        pc_bridge.init_db()
+        self.assertEqual(pc_bridge._INITIALIZED_DB, initialized)
+        self.assertTrue(pc_bridge.DB_FILE.is_file())
+
+    def test_queue_indexes_cover_hot_paths(self):
+        connection = pc_bridge._connect()
+        try:
+            names = {
+                row[1]
+                for row in connection.execute("PRAGMA index_list('pc_jobs')").fetchall()
+            }
+        finally:
+            connection.close()
+        self.assertIn("idx_pc_jobs_agent_recent", names)
+        self.assertIn("idx_pc_jobs_running_lease", names)
 
     def test_job_runs_through_queue_and_notification(self):
         created = pc_bridge.enqueue_job(

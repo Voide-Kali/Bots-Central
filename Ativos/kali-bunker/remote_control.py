@@ -752,7 +752,10 @@ def _load_ai_chat_history() -> dict[str, list[dict[str, str]]]:
 
 
 def _save_ai_chat_history(history: dict[str, list[dict[str, str]]]) -> None:
-    atomic_write_json(AI_CHAT_HISTORY_FILE, history)
+    try:
+        atomic_write_json(AI_CHAT_HISTORY_FILE, history)
+    except OSError:
+        pass
 
 
 def _load_ai_memory() -> list[dict[str, str]]:

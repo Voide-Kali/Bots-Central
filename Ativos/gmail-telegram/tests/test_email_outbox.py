@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -25,12 +26,13 @@ class EmailOutboxTests(unittest.TestCase):
     def test_outbox_stores_no_email_content_columns(self) -> None:
         db.enqueue_delivery("user@example.com", "gmail-id", now=100)
 
-        with sqlite3.connect(self.db_path) as conn:
-            columns = {
-                str(row[1])
-                for row in conn.execute("PRAGMA table_info(email_delivery)")
-            }
-            raw_database = self.db_path.read_bytes()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(email_delivery)")
+                }
+                raw_database = self.db_path.read_bytes()
 
         self.assertFalse(
             columns.intersection({"sender", "subject", "body", "snippet", "payload"})
@@ -39,22 +41,23 @@ class EmailOutboxTests(unittest.TestCase):
 
     def test_legacy_seen_rows_are_migrated_without_becoming_pending(self) -> None:
         self.db_path.unlink()
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE seen_emails (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account_email TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(account_email, message_id)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    CREATE TABLE seen_emails (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_email TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(account_email, message_id)
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute(
-                "INSERT INTO seen_emails (account_email, message_id) VALUES (?, ?)",
-                ("legacy@example.com", "old-id"),
-            )
+                conn.execute(
+                    "INSERT INTO seen_emails (account_email, message_id) VALUES (?, ?)",
+                    ("legacy@example.com", "old-id"),
+                )
         db.init_db()
 
         delivery = db.get_delivery("legacy@example.com", "old-id")

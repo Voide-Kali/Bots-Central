@@ -72,6 +72,8 @@ def scan_current(findings: set[str]) -> None:
         if SENSITIVE_PATH.search(relative) and relative not in ALLOWED_EXAMPLES:
             findings.add(f"caminho sensivel rastreado: {relative}")
         path = root / relative
+        if not path.exists():
+            continue
         try:
             scan_blob(f"possivel segredo: {relative}", path.read_bytes(), findings)
         except OSError:

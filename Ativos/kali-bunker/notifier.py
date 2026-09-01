@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import requests
 
@@ -16,7 +17,14 @@ from bunker_config import (
     SUPPORTED_ALERT_PROVIDERS,
 )
 
-_SESSION = requests.Session()
+_SESSION = requests
+
+
+def _redact_token(text: str) -> str:
+    value = str(text)
+    if TELEGRAM_BOT_TOKEN:
+        value = value.replace(TELEGRAM_BOT_TOKEN, "<telegram-token>")
+    return value
 
 
 def alert_configured() -> bool:
@@ -65,27 +73,33 @@ def _send_telegram(title: str, message: str, *, photo_path: str | None, url: str
         text = f"{text}\n\n{url}"
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-    try:
+    retries = 3
+    delay_seconds = 1
+    for attempt in range(retries):
         photo = Path(photo_path) if photo_path else None
-        if photo and photo.exists():
-            with photo.open("rb") as image:
+        try:
+            if photo and photo.exists():
+                with photo.open("rb") as image:
+                    response = _SESSION.post(
+                        f"{base_url}/sendPhoto",
+                        data={"chat_id": TELEGRAM_CHAT_ID, "caption": text[:1024]},
+                        files={"photo": image},
+                        timeout=15,
+                    )
+            else:
                 response = _SESSION.post(
-                    f"{base_url}/sendPhoto",
-                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": text[:1024]},
-                    files={"photo": image},
-                    timeout=15,
+                    f"{base_url}/sendMessage",
+                    data={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+                    timeout=10,
                 )
-        else:
-            response = _SESSION.post(
-                f"{base_url}/sendMessage",
-                data={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-                timeout=10,
-            )
-        response.raise_for_status()
-        return True
-    except requests.RequestException as exc:
-        print(f"[ERRO envio] {exc}")
-        return False
+            response.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            if attempt == retries - 1:
+                print(f"[ERRO envio] {_redact_token(exc)}")
+                return False
+            time.sleep(delay_seconds)
+    return False
 
 
 def _send_pushover(

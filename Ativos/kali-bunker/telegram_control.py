@@ -82,6 +82,12 @@ def main_keyboard() -> dict[str, Any]:
     if os.environ.get("KALI_BUNKER_OLD_PANEL", "").lower() in {"1", "true", "yes"}:
         # Painel antigo: teclado tipo ReplyKeyboard com botões maiores em linhas
         return {
+            "inline_keyboard": [
+                [inline_button("Painel", "menu:status"), inline_button("IA", "menu:ia")],
+                [inline_button("Serviços", "menu:services"), inline_button("Rede", "menu:rede")],
+                [inline_button("Cofre", "vault:menu"), inline_button("Pendentes", "menu:pendentes")],
+                [inline_button("Terminal", "menu:terminal"), inline_button("Arquivo", "menu:arquivo")],
+            ],
             "keyboard": [
                 [
                     {"text": "Painel"},

@@ -21,9 +21,10 @@ def get_local_ip() -> str:
     return ip[0] if ip else "desconhecido"
 
 
-def main() -> None:
+def main() -> int:
     if not alert_configured():
-        raise SystemExit(alert_config_error())
+        print(alert_config_error())
+        return 0
 
     host = socket.gethostname()
     ip_local = get_local_ip()
@@ -34,8 +35,8 @@ def main() -> None:
         f"PC ligado\nHost: {host}\nIP: {ip_local}\nHorario: {horario}",
         priority=0,
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())

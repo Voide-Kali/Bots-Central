@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import getpass
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -54,6 +55,7 @@ def get_alert_provider() -> str:
 
 
 OPERATIONAL_HOME = Path(get_config("KALI_BUNKER_HOME", str(Path.home()))).expanduser()
+USERNAME = get_config("USERNAME", getpass.getuser())
 ALERT_PROVIDER = get_alert_provider()
 PUSHOVER_TOKEN = get_config("PUSHOVER_TOKEN")
 PUSHOVER_USER = get_config("PUSHOVER_USER")

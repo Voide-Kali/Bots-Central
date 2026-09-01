@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+ATIVOS_DIR = Path(__file__).resolve().parents[1]
+if str(ATIVOS_DIR) not in sys.path:
+    sys.path.insert(0, str(ATIVOS_DIR))
+
+from shared_core.ai_provider import provider_order
+from shared_core.telegram_auth import parse_allowed_chat_ids
 
 
 def env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -30,29 +39,22 @@ MAX_HISTORY_MESSAGES = env_int("MAX_HISTORY_MESSAGES", 20, minimum=2)
 
 
 def active_ai_provider() -> str:
-    if AI_PROVIDER == "gemini":
-        return "gemini" if GEMINI_API_KEY else "indisponivel"
-    if AI_PROVIDER == "groq":
-        return "groq" if GROQ_API_KEY else "indisponivel"
-    if GEMINI_API_KEY:
-        return "gemini"
-    if GROQ_API_KEY:
-        return "groq"
-    return "indisponivel"
+    providers = provider_order(
+        AI_PROVIDER,
+        {"gemini": bool(GEMINI_API_KEY), "groq": bool(GROQ_API_KEY)},
+        ("gemini", "groq"),
+    )
+    return providers[0] if providers else "indisponivel"
 
 
 def fallback_ai_provider(primary: str) -> str | None:
-    if primary == "gemini" and GROQ_API_KEY:
-        return "groq"
-    if primary == "groq" and GEMINI_API_KEY:
-        return "gemini"
-    return None
+    providers = provider_order(
+        primary,
+        {"gemini": bool(GEMINI_API_KEY), "groq": bool(GROQ_API_KEY)},
+        ("gemini", "groq"),
+    )
+    return providers[1] if len(providers) > 1 else None
 
 
 def allowed_chat_ids() -> set[int] | None:
-    values = {
-        int(item.strip())
-        for item in ALLOWED_CHAT_IDS_RAW.split(",")
-        if item.strip().lstrip("-").isdigit()
-    }
-    return values or None
+    return parse_allowed_chat_ids(ALLOWED_CHAT_IDS_RAW)

@@ -5,11 +5,13 @@ Before=shutdown.target reboot.target halt.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 EnvironmentFile=-/home/voide/.env
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/voide
-ExecStart=/usr/bin/python3 /home/voide/notifica_shutdown.py
+ExecStart=/usr/bin/true
+ExecStop=/usr/bin/python3 /home/voide/notifica_shutdown.py
 TimeoutStartSec=20
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

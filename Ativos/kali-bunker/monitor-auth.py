@@ -4,11 +4,56 @@ import time
 import os
 import re
 import socket
+from dataclasses import dataclass
 from pathlib import Path
 from notifier import alert_configured, alert_config_error, send_alert
 
 COOLDOWN       = 15
 ultimo_alerta  = 0
+GEOLOCATION_ENABLED = 0
+REMOTE_UNLOCK_MARKER = Path("/tmp/kali-bunker-remote-unlock-requested")
+REMOTE_UNLOCK_IGNORE_SECONDS = 30
+AUTH_PATTERNS = (
+    re.compile(r"Failed password for (?P<usuario>\S+) from (?P<origem>\S+)"),
+    re.compile(r"Invalid user (?P<usuario>\S+) from (?P<origem>\S+)"),
+)
+
+
+@dataclass
+class AuthEvent:
+    usuario: str
+    origem: str
+    linha: str
+
+
+def find_auth_events(texto: str) -> list[AuthEvent]:
+    eventos: list[AuthEvent] = []
+    for linha in texto.splitlines():
+        for pattern in AUTH_PATTERNS:
+            match = pattern.search(linha)
+            if match:
+                eventos.append(
+                    AuthEvent(
+                        usuario=match.group("usuario"),
+                        origem=match.group("origem"),
+                        linha=linha,
+                    )
+                )
+                break
+    return eventos
+
+
+def should_ignore_auth_event(evento: AuthEvent, now: float | None = None) -> bool:
+    if evento.origem != "local/desconhecida":
+        return False
+    if "kde:auth" not in evento.linha and "kscreenlocker" not in evento.linha:
+        return False
+    try:
+        marker = float(REMOTE_UNLOCK_MARKER.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    momento = time.time() if now is None else float(now)
+    return momento - marker <= REMOTE_UNLOCK_IGNORE_SECONDS
 
 def tirar_foto():
     foto = f"/tmp/intruso_{int(time.time())}.jpg"

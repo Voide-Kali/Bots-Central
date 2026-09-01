@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,6 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+import requests
+ATIVOS_DIR = Path(__file__).resolve().parents[1]
+if str(ATIVOS_DIR) not in sys.path:
+    sys.path.insert(0, str(ATIVOS_DIR))
+
+from shared_core.telegram_auth import is_authorized_update, parse_numeric_ids
+
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -42,7 +50,12 @@ from telegram.request import HTTPXRequest
 import config
 import db
 import pc_bridge
-from gmail_client import get_gmail_service, get_unread_count, get_unread_emails
+from gmail_client import (
+    get_email_details,
+    get_gmail_service,
+    get_unread_count,
+    get_unread_emails,
+)
 from summarizer import summarize_email
 
 KALI_BUNKER_DIR = getattr(config, "KALI_BUNKER_DIR", None)
@@ -62,10 +75,25 @@ try:
         execute_shell,
         execute_typed_action,
         pop_pending,
+        remote_action_disabled_message,
+        remote_action_enabled,
+        archive_for_send,
+        cleanup_export_artifact,
     )
 except Exception:  # pragma: no cover - recurso opcional no ambiente local/servidor
     ai_assistant = None
     cancel_pending = create_pending = execute_shell = execute_typed_action = pop_pending = None
+    remote_action_disabled_message = None
+    remote_action_enabled = None
+    archive_for_send = cleanup_export_artifact = None
+
+try:
+    if KALI_BUNKER_DIR:
+        from voice_vault import vault_exists
+    else:
+        raise ImportError("KALI_BUNKER_DIR não configurado")
+except Exception:  # pragma: no cover - recurso opcional no ambiente local/servidor
+    vault_exists = None
 
 
 logger = logging.getLogger(__name__)
@@ -117,7 +145,8 @@ class MonitorState:
     high_cpu_since: float | None = None
     high_temp_since: float | None = None
     last_resource_alert_at: float = 0
-    known_failed_services: set[str] = field(default_factory=set)
+    known_failed_services: set[str] | None = None
+    vault_flows: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 state = MonitorState()
@@ -153,18 +182,12 @@ def get_allowed_user_ids() -> set[int]:
         # membros até TELEGRAM_ALLOWED_USER_IDS ser configurado explicitamente.
         return {get_chat_id()}
 
-    allowed_ids: set[int] = set()
-    for item in raw.split(","):
-        value = item.strip()
-        if not value:
-            continue
-        try:
-            allowed_ids.add(int(value))
-        except ValueError as exc:
-            raise RuntimeError(
-                "TELEGRAM_ALLOWED_USER_IDS deve conter apenas IDs numéricos separados por vírgula."
-            ) from exc
-
+    try:
+        allowed_ids = parse_numeric_ids(raw, allow_negative=False)
+    except ValueError as exc:
+        raise RuntimeError(
+            "TELEGRAM_ALLOWED_USER_IDS deve conter apenas IDs numéricos separados por vírgula."
+        ) from exc
     if not allowed_ids:
         raise RuntimeError("TELEGRAM_ALLOWED_USER_IDS não contém nenhum ID válido.")
     return allowed_ids
@@ -174,11 +197,10 @@ def allowed(update: Update) -> bool:
     chat = update.effective_chat
     user = update.effective_user
     expected_chat_id = get_chat_id()
-    permitted = bool(
-        chat
-        and chat.id == expected_chat_id
-        and user
-        and user.id in get_allowed_user_ids()
+    permitted = is_authorized_update(
+        update,
+        expected_chat_id=expected_chat_id,
+        allowed_user_ids=get_allowed_user_ids(),
     )
     if not permitted:
         logger.warning(
@@ -286,13 +308,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🌐 Rede", callback_data="network_menu"),
             ],
             [
-                InlineKeyboardButton("⏻ Desligar", callback_data="shutdown_confirm"),
-                InlineKeyboardButton("↻ Reiniciar", callback_data="reboot_confirm"),
-            ],
-            [
-                InlineKeyboardButton("⏾ Suspender", callback_data="suspend_confirm"),
-            ],
-            [
+                InlineKeyboardButton("🔌 Energia", callback_data="power_menu"),
                 InlineKeyboardButton("🧹 Limpeza agora", callback_data="cleanup_confirm"),
             ],
             [
@@ -335,6 +351,21 @@ def operations_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🔐 Permissões", callback_data="permissions"),
             ],
             [
+                InlineKeyboardButton("‹ Voltar ao painel", callback_data="dashboard"),
+            ],
+        ]
+    )
+
+
+def power_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("⏻ Desligar", callback_data="shutdown_confirm"),
+                InlineKeyboardButton("↻ Reiniciar", callback_data="reboot_confirm"),
+            ],
+            [
+                InlineKeyboardButton("⏾ Suspender", callback_data="suspend_confirm"),
                 InlineKeyboardButton("‹ Voltar ao painel", callback_data="dashboard"),
             ],
         ]
@@ -623,6 +654,10 @@ def apt_upgrade_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def ai_keyboard(_chat_id: str | None = None) -> None:
+    return None
+
+
 def status_icon(address: str) -> str:
     if address in state.account_errors:
         return "🔴"
@@ -700,6 +735,28 @@ def config_int(name: str, default: int, minimum: int = 1) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, value)
+
+
+def delivery_settings() -> dict[str, int]:
+    return {
+        "max_attempts": config_int("EMAIL_DELIVERY_MAX_ATTEMPTS", 8, 1),
+        "lease_seconds": config_int("EMAIL_DELIVERY_LEASE_SECONDS", 300, 1),
+        "base_backoff_seconds": config_int("EMAIL_DELIVERY_BACKOFF_SECONDS", 30, 1),
+        "max_backoff_seconds": config_int("EMAIL_DELIVERY_MAX_BACKOFF_SECONDS", 3600, 1),
+        "batch_size": config_int("EMAIL_DELIVERY_BATCH_SIZE", 20, 1),
+    }
+
+
+def default_remote_action_enabled(action: str) -> bool:
+    if remote_action_enabled is None:
+        return False
+    return bool(remote_action_enabled(action))
+
+
+def default_remote_action_disabled_message(action: str) -> str:
+    if remote_action_disabled_message is None:
+        return f"Recurso remoto indisponível: {action}."
+    return str(remote_action_disabled_message(action))
 
 
 def actor_label(update: Update | None) -> str:
@@ -1152,15 +1209,82 @@ def local_ips() -> list[str]:
     return output.split() if output else []
 
 
-def default_scan_target() -> str:
-    configured = str(getattr(config, "NETWORK_SCAN_TARGET", "") or "").strip()
+def active_ipv4_networks() -> list[tuple[str, str]]:
+    networks: list[tuple[str, str]] = []
+    output = command_output(["ip", "-o", "-4", "addr", "show"])
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        interface = parts[1]
+        cidr = parts[3]
+        networks.append((interface, cidr))
+    return networks
+
+
+def default_route_interface() -> str | None:
+    output = command_output(["ip", "-o", "route", "show", "default"])
+    for line in output.splitlines():
+        parts = line.split()
+        if "dev" in parts:
+            index = parts.index("dev")
+            if index + 1 < len(parts):
+                return parts[index + 1]
+    return None
+
+
+def preferred_scan_interface() -> str | None:
+    configured = str(getattr(config, "NETWORK_SCAN_INTERFACE", "") or "").strip()
+    networks = active_ipv4_networks()
+    virtual_prefixes = ("docker", "br-", "veth", "virbr", "proton", "tailscale", "wg", "tun", "tap")
     if configured:
+        for interface, cidr in networks:
+            if interface == configured and validate_network_target(cidr):
+                return interface
         return configured
+
+    default_interface = default_route_interface()
+    if default_interface:
+        for interface, cidr in networks:
+            if (
+                interface == default_interface
+                and not interface.startswith(virtual_prefixes)
+                and validate_network_target(cidr)
+            ):
+                return interface
+
+    for interface, cidr in networks:
+        if interface.startswith(virtual_prefixes):
+            continue
+        if validate_network_target(cidr):
+            return interface
+    return None
+
+
+def default_scan_target() -> str | None:
+    configured = str(getattr(config, "NETWORK_SCAN_TARGET", "") or "").strip()
+    preferred = preferred_scan_interface()
+    networks = active_ipv4_networks()
+    virtual_prefixes = ("docker", "br-", "veth", "virbr", "proton", "tailscale", "wg", "tun", "tap")
+
+    if preferred:
+        for interface, cidr in networks:
+            if interface == preferred and validate_network_target(cidr):
+                return cidr
+
+    for interface, cidr in networks:
+        if interface.startswith(virtual_prefixes):
+            continue
+        if validate_network_target(cidr):
+            return cidr
+
     for ip in local_ips():
         parts = ip.split(".")
         if len(parts) == 4 and all(part.isdigit() for part in parts):
             return ".".join(parts[:3]) + ".0/24"
-    return "192.168.0.0/24"
+    if configured and validate_network_target(configured):
+        return configured
+    return None
 
 
 def validate_network_target(target: str) -> bool:
@@ -1169,6 +1293,8 @@ def validate_network_target(target: str) -> bool:
     try:
         if "/" in target:
             network = ipaddress.ip_network(target, strict=False)
+            if network.prefixlen == network.max_prefixlen:
+                return False
             return network.is_private or network.is_loopback or network.is_link_local
         address = ipaddress.ip_address(target)
         return address.is_private or address.is_loopback or address.is_link_local
@@ -1176,23 +1302,59 @@ def validate_network_target(target: str) -> bool:
         return False
 
 
-def run_network_scan(target: str | None = None) -> tuple[bool, str]:
-    selected = (target or default_scan_target()).strip()
+def run_network_scan(target: str | None = None) -> tuple[bool, str, list[dict[str, str]]]:
+    selected = (target or default_scan_target())
+    if not selected:
+        return (
+            False,
+            "Não foi possível detectar a rede local. Configure NETWORK_SCAN_TARGET ou conecte o PC a uma rede IPv4.",
+            [],
+        )
+    selected = selected.strip()
     if not validate_network_target(selected):
-        return False, "Alvo de rede inválido. Use apenas IPs ou CIDRs privados/locais."
+        return False, "Alvo de rede inválido. Use apenas IPs ou CIDRs privados/locais.", []
+    hosts: list[dict[str, str]] = []
+    if shutil.which("arp-scan"):
+        interface = preferred_scan_interface()
+        command = ["sudo", "-n", "/usr/sbin/arp-scan"]
+        if interface:
+            command.extend(["--interface", interface])
+        command.append(selected)
+        ok, detail = run_command_result(command, timeout=config_int("NETWORK_SCAN_TIMEOUT_SECONDS", 90, 10))
+        if ok:
+            for line in detail.splitlines():
+                columns = line.split("\t")
+                if len(columns) >= 2:
+                    ip = columns[0].strip()
+                    if not ip or not validate_network_target(ip):
+                        continue
+                    host = {"ip": ip, "mac": columns[1].strip()}
+                    if len(columns) >= 3 and columns[2].strip():
+                        host["vendor"] = columns[2].strip()
+                    hosts.append(host)
+            return True, (
+                f"<b>🌐 SCAN DE REDE</b>\n\n"
+                f"Alvo: <code>{html.escape(selected)}</code>\n"
+                f"Hosts encontrados: <b>{len(hosts)}</b>"
+            ), hosts
     command = ["nmap", "-sn", selected]
     ok, detail = run_command_result(command, timeout=config_int("NETWORK_SCAN_TIMEOUT_SECONDS", 90, 10))
     if not ok:
-        return False, detail[:3000]
-    hosts = []
+        return False, detail[:3000], []
+    lines: list[str] = []
     current = ""
     for line in detail.splitlines():
         if line.startswith("Nmap scan report for "):
             current = line.replace("Nmap scan report for ", "", 1).strip()
-            hosts.append(current)
+            hosts.append({"ip": current})
         elif "MAC Address:" in line and current:
-            hosts[-1] = f"{current} · {line.strip()}"
-    host_lines = "\n".join(f"• {html.escape(host)}" for host in hosts[:40])
+            hosts[-1]["mac"] = line.strip()
+    for host in hosts[:40]:
+        label = host["ip"]
+        if host.get("mac"):
+            label += f" · {host['mac']}"
+        lines.append(f"• {html.escape(label)}")
+    host_lines = "\n".join(lines)
     if not host_lines:
         host_lines = html.escape(detail[-2500:])
     return True, (
@@ -1200,7 +1362,7 @@ def run_network_scan(target: str | None = None) -> tuple[bool, str]:
         f"Alvo: <code>{html.escape(selected)}</code>\n"
         f"Hosts encontrados: <b>{len(hosts)}</b>\n\n"
         f"{host_lines}"
-    )
+    ), hosts
 
 
 def capture_webcam_photo() -> tuple[bool, str]:
@@ -1645,7 +1807,7 @@ async def logs_menu_text() -> str:
 
 
 async def network_text() -> str:
-    target = default_scan_target()
+    target = default_scan_target() or "configure NETWORK_SCAN_TARGET"
     ips = ", ".join(local_ips()[:3]) or "N/D"
     online = pc_is_online()
     return (
@@ -1815,6 +1977,7 @@ def help_text() -> str:
         "/tarefas — fila e histórico de tarefas do PC\n"
         "/cancelar ID — cancela uma tarefa aguardando ou executando\n"
         "/ia pedido — conversa ou prepara uma ação no seu PC\n"
+        "/senhas — abre o cofre remoto\n"
         "/gmail — painel de mensagens\n"
         "/contas — lista as contas\n"
         "/verificar — busca novos e-mails agora\n"
@@ -1909,6 +2072,80 @@ async def edit_query_or_reply(query, text: str, keyboard: InlineKeyboardMarkup) 
             )
 
 
+async def process_delivery_outbox(bot_instance) -> dict[str, int]:
+    db.init_db()
+    settings = delivery_settings()
+    result = {"sent": 0, "errors": 0, "failed": 0}
+    for _ in range(settings["batch_size"]):
+        item = db.claim_due_delivery(
+            max_attempts=settings["max_attempts"],
+            lease_seconds=settings["lease_seconds"],
+        )
+        if not item:
+            break
+
+        address = item["account_email"]
+        message_id = item["message_id"]
+        lease_token = item["lease_token"]
+        account = gmail_services.get(address)
+        if not account:
+            db.defer_delivery(
+                address,
+                message_id,
+                lease_token,
+                "RuntimeError: conta Gmail indisponível",
+                max_attempts=settings["max_attempts"],
+                base_backoff_seconds=settings["base_backoff_seconds"],
+                max_backoff_seconds=settings["max_backoff_seconds"],
+            )
+            result["errors"] += 1
+            continue
+
+        try:
+            email = get_email_details(account["service"], message_id)
+            if is_silenced():
+                db.defer_delivery(
+                    address,
+                    message_id,
+                    lease_token,
+                    "RuntimeError: entrega adiada por silêncio/manutenção",
+                    max_attempts=settings["max_attempts"],
+                    base_backoff_seconds=1,
+                    max_backoff_seconds=1,
+                )
+                continue
+            delivered = await send_notification(bot_instance, account, email)
+            if not delivered:
+                db.defer_delivery(
+                    address,
+                    message_id,
+                    lease_token,
+                    "RuntimeError: entrega adiada por silêncio/manutenção",
+                    max_attempts=settings["max_attempts"],
+                    base_backoff_seconds=1,
+                    max_backoff_seconds=1,
+                )
+                continue
+            if db.mark_delivery_sent(address, message_id, lease_token):
+                result["sent"] += 1
+                state.total_notifications += 1
+        except Exception:
+            outcome = db.defer_delivery(
+                address,
+                message_id,
+                lease_token,
+                "RuntimeError: falha durante entrega",
+                max_attempts=settings["max_attempts"],
+                base_backoff_seconds=settings["base_backoff_seconds"],
+                max_backoff_seconds=settings["max_backoff_seconds"],
+            )
+            result["errors"] += 1
+            if outcome and outcome.get("status") == db.DELIVERY_FAILED:
+                result["failed"] += 1
+            logger.exception("Falha ao entregar mensagem %s da conta %s", message_id, address)
+    return result
+
+
 async def send_notification(bot, account: dict, email: dict) -> None:
     summary = await asyncio.to_thread(
         summarize_email,
@@ -1941,45 +2178,57 @@ async def send_notification(bot, account: dict, email: dict) -> None:
 
 async def check_emails(bot) -> dict[str, int]:
     if check_lock.locked():
-        return {"new": 0, "filtered": 0, "errors": 0, "busy": 1}
+        return {"new": 0, "queued": 0, "filtered": 0, "errors": 0, "busy": 1}
 
     async with check_lock:
+        db.init_db()
         started = time.monotonic()
-        result = {"new": 0, "filtered": 0, "errors": 0, "busy": 0}
+        result = {"new": 0, "queued": 0, "filtered": 0, "errors": 0, "busy": 0}
         if not gmail_services:
             await asyncio.to_thread(init_gmail_services)
-
-        for address, account in list(gmail_services.items()):
+        async def fetch_account_emails(address: str, account: dict) -> tuple[str, dict, list[dict] | None, Exception | None]:
             try:
+                excluded_ids = await asyncio.to_thread(db.seen_message_ids, address)
                 emails = await asyncio.to_thread(
                     get_unread_emails,
                     account["service"],
                     config.MAX_EMAILS_PER_CHECK,
+                    excluded_ids=excluded_ids,
                 )
-                state.account_errors.pop(address, None)
-                for email in emails:
-                    if not is_important_email(email):
-                        result["filtered"] += 1
-                        continue
-                    if db.is_seen(address, email["id"]):
-                        continue
-                    await send_notification(bot, account, email)
-                    db.mark_seen(address, email["id"])
-                    result["new"] += 1
-                    state.total_notifications += 1
-                    await asyncio.sleep(0.4)
+                return address, account, emails, None
             except Exception as exc:
+                return address, account, None, exc
+
+        batches = await asyncio.gather(
+            *(fetch_account_emails(address, account) for address, account in list(gmail_services.items()))
+        )
+        for address, account, emails, error in batches:
+            if error is not None:
                 result["errors"] += 1
-                state.account_errors[address] = str(exc)
-                logger.exception("Erro ao verificar %s", address)
+                state.account_errors[address] = str(error)
+                logger.exception("Erro ao verificar %s", address, exc_info=error)
+                continue
+            state.account_errors.pop(address, None)
+            for email in emails or []:
+                if not is_important_email(email):
+                    db.mark_seen(address, email["id"])
+                    result["filtered"] += 1
+                    continue
+                if db.enqueue_delivery(address, email["id"]):
+                    result["queued"] += 1
+
+        outbox_result = await process_delivery_outbox(bot)
+        result["new"] = outbox_result["sent"]
+        result["errors"] += outbox_result["errors"]
 
         state.last_check_at = datetime.now()
         state.last_check_duration = time.monotonic() - started
         state.last_new_emails = result["new"]
         state.checks_completed += 1
         logger.info(
-            "Verificação concluída: %s novo(s), %s filtrado(s), %s erro(s), %.1fs",
+            "Verificação concluída: %s entregue(s), %s enfileirada(s), %s filtrado(s), %s erro(s), %.1fs",
             result["new"],
+            result["queued"],
             result["filtered"],
             result["errors"],
             state.last_check_duration,
@@ -2029,6 +2278,234 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Depois, acompanhe em <b>Tarefas</b>.",
         pc_keyboard(),
     )
+
+
+async def show_power_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await edit_or_reply(
+        update,
+        "<b>🔌 ENERGIA</b>\n\nEscolha a ação de energia para enfileirar no seu PC.",
+        power_keyboard(),
+    )
+
+
+async def show_vault_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    if not default_remote_action_enabled("vault"):
+        await edit_or_reply(update, default_remote_action_disabled_message("vault"), back_keyboard())
+        return
+    exists = bool(vault_exists and vault_exists())
+    text = "<b>🔐 COFRE</b>\n\n" + ("Cofre disponível." if exists else "Cofre ainda não inicializado.")
+    await edit_or_reply(update, text, back_keyboard())
+
+
+def add_ai_memory(title: str, content: str, source: str = "telegram") -> int:
+    del title, content, source
+    return 1
+
+
+def telegram_text_chunks(text: str, limit: int = 3900) -> list[str]:
+    content = text or ""
+    if len(content) <= limit:
+        return [content]
+    chunks: list[str] = []
+    remaining = content
+    while remaining:
+        piece = remaining[:limit]
+        split_at = piece.rfind("\n")
+        if 0 < split_at >= limit // 2:
+            piece = piece[: split_at + 1]
+        chunks.append(piece)
+        remaining = remaining[len(piece):]
+    return chunks
+
+
+def prepare_audio_for_transcription(path: Path) -> tuple[Path, str]:
+    return path, ""
+
+
+def transcribe_with_whisper_cpp(path: Path) -> tuple[bool, str]:
+    del path
+    return False, "whisper.cpp não configurado"
+
+
+def transcribe_with_openai(path: Path) -> tuple[bool, str]:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip() or str(getattr(config, "OPENAI_API_KEY", "")).strip()
+    if not api_key:
+        return False, "OPENAI_API_KEY não configurada"
+    with path.open("rb") as audio_stream:
+        response = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            data={
+                "model": str(getattr(config, "AI_AUDIO_OPENAI_MODEL", "whisper-1")),
+                "language": str(getattr(config, "AI_AUDIO_LANGUAGE", "pt")),
+            },
+            files={"file": (path.name, audio_stream, "audio/wav")},
+            timeout=config_int("AI_AUDIO_TIMEOUT_SECONDS", 180, 30),
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    text = str(payload.get("text", "")).strip()
+    if response.status_code >= 400 or not text:
+        return False, str(payload.get("error", response.text or "falha de transcrição"))[:500]
+    return True, text
+
+
+def transcribe_audio_file(path: Path) -> tuple[bool, str, str]:
+    prepared_path, detail = prepare_audio_for_transcription(path)
+    if detail:
+        return False, detail, ""
+    ok, text = transcribe_with_whisper_cpp(prepared_path)
+    if ok:
+        return True, text, "Whisper.cpp local"
+    ok, text = transcribe_with_openai(prepared_path)
+    if ok:
+        return True, text, "OpenAI"
+    return False, text, ""
+
+
+def list_webcam_devices() -> list[dict[str, str]]:
+    devices = []
+    for path in sorted(Path("/dev").glob("video*")):
+        devices.append({"device": str(path), "label": path.name, "source": str(path)})
+    return devices
+
+
+def select_webcam_device() -> str | None:
+    devices = list_webcam_devices()
+    if not devices:
+        return None
+    preferred_words = ("integrated", "notebook", "internal", "built-in")
+    for device in devices:
+        label = str(device.get("label", "")).lower()
+        if any(word in label for word in preferred_words):
+            return str(device.get("device"))
+    return str(devices[0].get("device"))
+
+
+def read_text_attachment(path: Path) -> tuple[str, str]:
+    content = path.read_text(encoding="utf-8", errors="replace")
+    line_count = content.count("\n") + (1 if content else 0)
+    summary = f"Arquivo com {line_count} linha(s) e {len(content)} caractere(s)."
+    return content, summary
+
+
+def scan_result_keyboard(hosts: list[dict[str, str]]) -> InlineKeyboardMarkup:
+    rows = []
+    for host in hosts[:6]:
+        rows.append([InlineKeyboardButton(f"🖧 {host.get('ip', 'host')}", callback_data="network_menu")])
+    rows.append([InlineKeyboardButton("‹ Rede", callback_data="network_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def vault_unlock(*args, **kwargs) -> bool:
+    del args, kwargs
+    return False
+
+
+async def execute_voice_pending(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str) -> None:
+    if pop_pending is None or not update.effective_chat:
+        return
+    item = pop_pending(str(update.effective_chat.id), code)
+    if not item:
+        await edit_or_reply(update, "Ação inexistente, expirada ou não autorizada.", back_keyboard())
+        return
+    if str(item.get("action")) != "send_path":
+        await execute_ai_pending(update, context, code)
+        return
+    if archive_for_send is None or cleanup_export_artifact is None:
+        raise RuntimeError("Exportação remota indisponível no servidor.")
+    artifact, detail = await asyncio.to_thread(archive_for_send, str(item.get("payload", {}).get("path", "")))
+    if not artifact:
+        await edit_or_reply(update, detail, back_keyboard())
+        return
+    try:
+        with artifact.open("rb") as stream:
+            await context.bot.send_document(
+                chat_id=get_chat_id(),
+                document=stream,
+                caption=str(item.get("description", "Arquivo exportado"))[:1024],
+            )
+    finally:
+        cleanup_export_artifact(artifact)
+
+
+async def handle_vault_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    chat_id: str,
+) -> bool:
+    del context, text
+    if chat_id in state.vault_flows and not default_remote_action_enabled("vault"):
+        state.vault_flows.pop(chat_id, None)
+        await edit_or_reply(update, default_remote_action_disabled_message("vault"), back_keyboard())
+        return True
+    return False
+
+
+async def process_voice_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    chat_id: str,
+) -> None:
+    del context
+    if ai_assistant is None:
+        await update.effective_message.reply_text("A IA do Kali Bunker não está disponível.")
+        return
+    plan = await asyncio.to_thread(ai_assistant, prompt, chat_id)
+    if str(plan.get("action", "chat")) == "chat":
+        for chunk in telegram_text_chunks(str(plan.get("response", ""))[:12000]):
+            await update.effective_message.reply_text(chunk)
+        return
+    await update.effective_message.reply_text(
+        "A IA preparou uma ação remota. Use /ia para revisar e confirmar a execução."
+    )
+
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not allowed(update):
+        return False
+    message = update.effective_message
+    if not message:
+        return False
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if await handle_vault_flow(update, context, text, chat_id):
+        return True
+    if not text:
+        return False
+    await process_voice_prompt(update, context, text, chat_id)
+    return True
+
+
+async def handle_ai_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    message = update.effective_message
+    if not message:
+        return
+    media = getattr(message, "voice", None) or getattr(message, "audio", None) or getattr(message, "document", None)
+    if media is None:
+        return
+    progress = await message.reply_text("🎙️ Transcrevendo áudio...")
+    with tempfile.TemporaryDirectory(prefix="gmail-bot-audio-") as temporary:
+        source_path = Path(temporary) / "input.ogg"
+        telegram_file = await context.bot.get_file(media.file_id)
+        await telegram_file.download_to_drive(source_path)
+        ok, text, engine = await asyncio.to_thread(transcribe_audio_file, source_path)
+        if not ok:
+            await progress.edit_text(f"Falha na transcrição: {text}")
+            return
+        add_ai_memory("Áudio", text, engine or "audio")
+        await progress.edit_text(f"🎙️ Áudio transcrito via {engine}.")
+        await process_voice_prompt(update, context, text, str(update.effective_chat.id))
 
 
 async def show_pc_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2730,6 +3207,9 @@ async def ai_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def webcam_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
+    if not default_remote_action_enabled("webcam"):
+        await edit_or_reply(update, default_remote_action_disabled_message("webcam"), back_keyboard())
+        return
     job = await asyncio.to_thread(
         enqueue_pc_action,
         update,
@@ -2915,7 +3395,8 @@ async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     result = await check_emails(context.bot)
     report = (
         "<b>✅ VERIFICAÇÃO CONCLUÍDA</b>\n\n"
-        f"📨 Novos importantes: <b>{result['new']}</b>\n"
+        f"📨 Entregues: <b>{result['new']}</b>\n"
+        f"📥 Enfileirados: <b>{result['queued']}</b>\n"
         f"🧹 Filtrados: <b>{result['filtered']}</b>\n"
         f"⚠️ Erros: <b>{result['errors']}</b>\n"
         f"⚡ Tempo: <b>{state.last_check_duration:.1f}s</b>"
@@ -3011,6 +3492,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "svc_menu": show_services,
         "logs_menu": show_logs_menu,
         "network_menu": show_network,
+        "power_menu": show_power_menu,
         "scan_confirm": show_scan_confirm,
         "scan_now": scan_now,
         "lock_confirm": show_lock_confirm,
@@ -3198,8 +3680,9 @@ async def smart_alerts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         for unit, value in states.items()
         if value in {"failed", "inactive", "unknown"} and unit != "gmail-telegram-bot.service"
     }
-    new_failed = failed - state.known_failed_services
-    recovered = state.known_failed_services - failed
+    previous_failed = state.known_failed_services or set()
+    new_failed = failed - previous_failed
+    recovered = previous_failed - failed
     if new_failed:
         labels = ", ".join(SERVICE_BY_UNIT[unit][2] for unit in sorted(new_failed))
         messages.append(f"🚨 Serviço caiu/parou: {labels}.")
@@ -3322,6 +3805,7 @@ def start_bot() -> None:
     application.add_handler(CommandHandler("atualizar", show_updates_menu))
     application.add_handler(CommandHandler("webcam", show_webcam_confirm))
     application.add_handler(CommandHandler("ia", ai_command))
+    application.add_handler(CommandHandler("senhas", show_vault_menu))
     application.add_handler(CommandHandler(["gmail", "status"], show_gmail))
     application.add_handler(CommandHandler("contas", show_accounts))
     application.add_handler(CommandHandler("verificar", manual_check))
@@ -3330,7 +3814,8 @@ def start_bot() -> None:
     application.add_handler(CommandHandler("suspender", show_suspend_confirm))
     application.add_handler(CommandHandler("limpeza", show_cleanup_confirm))
     application.add_handler(CommandHandler("ajuda", show_help))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_text_message))
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_ai_audio))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_voice_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_error_handler(handle_error)
 

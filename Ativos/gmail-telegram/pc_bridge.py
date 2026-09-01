@@ -60,7 +60,6 @@ def _connect() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_FILE, timeout=15)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 15000")
-    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 
@@ -119,6 +118,9 @@ def init_db() -> None:
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         connection = _connect()
         try:
+            # journal_mode é persistente no arquivo; configure uma vez durante
+            # inicialização em vez de renegociá-lo em toda conexão do hot path.
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
             CREATE TABLE IF NOT EXISTS pc_agents (
@@ -355,6 +357,23 @@ def claim_job(
         connection.close()
 
 
+def _queued_job_exists(agent_id: str) -> bool:
+    normalized_agent = _agent_id(agent_id)
+    connection = _connect()
+    try:
+        row = connection.execute(
+            """
+            SELECT 1 FROM pc_jobs
+            WHERE target_agent = ? AND status = 'queued'
+            LIMIT 1
+            """,
+            (normalized_agent,),
+        ).fetchone()
+        return row is not None
+    finally:
+        connection.close()
+
+
 def wait_for_job(
     agent_id: str,
     metadata: dict[str, Any] | None = None,
@@ -363,22 +382,41 @@ def wait_for_job(
     wait_seconds: int = 0,
     interval_seconds: float = 1.0,
 ) -> dict[str, Any] | None:
-    """Long-poll local no servidor para reduzir forks SSH/Python do agente ocioso."""
+    """Long-poll local no servidor com leitura barata enquanto a fila está vazia."""
     wait = max(0, min(int(wait_seconds), 60))
     interval = max(0.2, min(float(interval_seconds), 5.0))
     deadline = time.monotonic() + wait
-    first_attempt = True
 
+    # Primeiro claim atualiza heartbeat/metadata e também recupera leases vencidos.
+    job = claim_job(
+        agent_id,
+        metadata,
+        lease_seconds=lease_seconds,
+        update_agent=True,
+    )
+    if job is not None or wait <= 0:
+        return job
+
+    # Enquanto o agente espera, evite BEGIN IMMEDIATE em cada tick. A maioria
+    # absoluta dos ticks ociosos vira um SELECT indexado. A cada ~5 s fazemos
+    # um claim completo para preservar recuperação de leases expirados.
+    next_recovery = time.monotonic() + min(5.0, max(interval, 1.0))
     while True:
-        job = claim_job(
-            agent_id,
-            metadata if first_attempt else None,
-            lease_seconds=lease_seconds,
-            update_agent=first_attempt,
-        )
-        first_attempt = False
-        if job is not None or time.monotonic() >= deadline:
-            return job
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+
+        if _queued_job_exists(agent_id) or now >= next_recovery:
+            job = claim_job(
+                agent_id,
+                None,
+                lease_seconds=lease_seconds,
+                update_agent=False,
+            )
+            if job is not None:
+                return job
+            next_recovery = time.monotonic() + min(5.0, max(interval, 1.0))
+
         time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
